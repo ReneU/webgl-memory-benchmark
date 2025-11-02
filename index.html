@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebGL Texture Memory Benchmark</title>
+    <style>
+      :root {
+        --bg: #0b0e14;
+        --panel: #121722;
+        --muted: #9aa4b2;
+        --text: #e6edf3;
+        --accent: #5b9cf0;
+        --warn: #ffb86b;
+        --error: #ff6b6b;
+        --ok: #79c26a;
+        --border: #202737;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        line-height: 1.45;
+      }
+      .container {
+        max-width: 1600px;
+        margin: 32px auto 80px;
+        padding: 0 16px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 22px;
+        font-weight: 600;
+      }
+      .subtle { color: var(--muted); }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+      }
+      .controls label {
+        display: block;
+        margin: 10px 0 6px;
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      select, input[type="number"], input[type="text"] {
+        background: #0f1420;
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 8px 10px;
+        border-radius: 8px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      input[type="checkbox"] { transform: translateY(1px); }
+      button {
+        background: #192234;
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 10px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      button.primary { background: #23406f; border-color: #2a4d87; }
+      button.warn { background: #3a2a12; border-color: #5a3a14; color: #ffd9a6; }
+      button.error { background: #3a1414; border-color: #5a1b1b; color: #ffc7c7; }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; }
+      .kv .k { color: var(--muted); }
+      .kv .v { font-variant-numeric: tabular-nums; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .log {
+        max-height: 200px;
+        overflow: auto;
+        background: #0f1420;
+        border: 1px dashed var(--border);
+        padding: 10px;
+        border-radius: 8px;
+        font-size: 12px;
+      }
+      canvas { width: 100%; height: 200px; display: block; background: #0f1420; border-radius: 8px; }
+      .bad { color: var(--error); }
+      .good { color: var(--ok); }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>WebGL Texture Memory Benchmark</h1>
+      <div class="subtle">Allocate textures to probe GPU memory limits. Use carefully; may reset your graphics driver.</div>
+
+      <div class="grid" style="margin-top:16px;">
+        <div class="panel controls">
+          <div class="row" style="justify-content:space-between; align-items:baseline;">
+            <div class="subtle">Controls</div>
+            <div class="subtle mono" id="apiLabel">API: -</div>
+          </div>
+
+          <label>Texture edge (px)</label>
+          <select id="sizeSelect">
+            <option value="256">256</option>
+            <option value="512">512</option>
+            <option value="1024" selected>1024</option>
+            <option value="2048">2048</option>
+            <option value="4096">4096</option>
+            <option value="8192">8192</option>
+          </select>
+
+          <div class="row" style="margin-top:8px;">
+            <label class="row" style="gap:8px;">
+              <input type="checkbox" id="useMipmaps" checked />
+              Use mipmaps
+            </label>
+            <label class="row" style="gap:8px;">
+              <input type="checkbox" id="useTexStorage" />
+              Use texStorage2D (WebGL2)
+            </label>
+            <label class="row" style="gap:8px;">
+              <input type="checkbox" id="uploadData" checked />
+              Upload CPU data (stronger allocation)
+            </label>
+          </div>
+
+          <label>Allocate count</label>
+          <div class="row">
+            <input id="allocCount" type="number" min="1" value="16" />
+            <button class="primary" id="btnAlloc">Allocate</button>
+            <button id="btnAlloc100">+100</button>
+            <button id="btnUntilFail">Until failure</button>
+          </div>
+
+          <label>Target MB</label>
+          <div class="row">
+            <input id="targetMB" type="number" min="1" value="1024" />
+            <button id="btnAllocTarget">Allocate to target</button>
+          </div>
+
+          <div class="row" style="margin-top:8px;">
+            <button class="warn" id="btnFreeLast">Free last 10</button>
+            <button class="warn" id="btnFreeHalf">Free half</button>
+            <button class="error" id="btnFreeAll">Free all</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="subtle">Stats</div>
+          <div class="kv" style="margin-top:8px;">
+            <div class="k">Allocated textures</div><div class="v mono" id="statTex">0</div>
+            <div class="k">Approx bytes</div><div class="v mono" id="statBytes">0</div>
+            <div class="k">Approx MiB</div><div class="v mono" id="statMB">0</div>
+            <div class="k">Per-texture MiB</div><div class="v mono" id="statPerTex">-</div>
+            <div class="k">MAX_TEXTURE_SIZE</div><div class="v mono" id="statMaxSize">-</div>
+            <div class="k">MAX_TEXTURE_IMAGE_UNITS</div><div class="v mono" id="statTexUnits">-</div>
+            <div class="k">Renderer</div><div class="v mono" id="statRenderer">-</div>
+            <div class="k">Vendor</div><div class="v mono" id="statVendor">-</div>
+            <div class="k">Context</div><div class="v mono" id="statCtx">active</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="subtle">Canvas</div>
+          <canvas id="glcanvas" width="640" height="360"></canvas>
+          <div id="ctxWarning" class="subtle bad" style="display:none; margin-top:8px;">Context lost. Free some textures or wait for restore.</div>
+        </div>
+
+        <div class="panel">
+          <div class="subtle">Log</div>
+          <div id="log" class="log mono"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function() {
+        'use strict';
+
+        /** @typedef {{ tex: WebGLTexture, width: number, height: number, levels: number, bytes: number }} TextureRecord */
+
+        const $ = (id) => document.getElementById(id);
+        const logEl = $('log');
+        function log(msg, cls) {
+          const line = document.createElement('div');
+          if (cls) line.className = cls;
+          const time = new Date().toLocaleTimeString();
+          line.textContent = '[' + time + '] ' + msg;
+          logEl.appendChild(line);
+          logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        const canvas = $('glcanvas');
+        const contextAttribs = { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: 'high-performance', desynchronized: true };
+        let gl = canvas.getContext('webgl2', contextAttribs);
+        let api = 'WebGL1';
+        if (!gl) {
+          gl = canvas.getContext('webgl', contextAttribs) || canvas.getContext('experimental-webgl', contextAttribs);
+          api = 'WebGL1';
+        }
+        const isWebGL2 = (api === 'WebGL2');
+        $('apiLabel').textContent = 'API: ' + api;
+
+        if (!gl) {
+          log('Unable to initialize WebGL.', 'bad');
+          $('statCtx').textContent = 'unavailable';
+          return;
+        }
+
+        // Query limits and renderer info
+        const maxSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0;
+        const texUnits = gl.getParameter(gl.MAX_TEXTURE_IMAGE_UNITS) || 0;
+        $('statMaxSize').textContent = String(maxSize);
+        $('statTexUnits').textContent = String(texUnits);
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        const vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+        $('statRenderer').textContent = renderer || '-';
+        $('statVendor').textContent = vendor || '-';
+
+        // UI elements
+        const sizeSelect = $('sizeSelect');
+        const useMipmaps = $('useMipmaps');
+        const useTexStorage = $('useTexStorage');
+        const uploadData = $('uploadData');
+        const allocCount = $('allocCount');
+        const targetMB = $('targetMB');
+
+        // Disable texStorage checkbox if not WebGL2
+        if (!isWebGL2) {
+          useTexStorage.checked = false;
+          useTexStorage.disabled = true;
+        }
+
+        // Clamp size options to MAX_TEXTURE_SIZE
+        for (const opt of Array.from(sizeSelect.options)) {
+          const v = parseInt(opt.value, 10);
+          if (v > maxSize) opt.disabled = true;
+        }
+
+        /** @type {TextureRecord[]} */
+        const textures = [];
+        let approxBytes = 0;
+
+        function bytesForLevels(width, height, withMipmaps) {
+          let total = 0;
+          let w = width;
+          let h = height;
+          let levels = 1;
+          while (true) {
+            total += Math.max(1, w) * Math.max(1, h) * 4; // RGBA8
+            if (!withMipmaps || (w === 1 && h === 1)) break;
+            w = Math.max(1, w >> 1);
+            h = Math.max(1, h >> 1);
+            levels++;
+          }
+          return { bytes: total, levels };
+        }
+
+        function updateStats(perTexBytes) {
+          $('statTex').textContent = String(textures.length);
+          $('statBytes').textContent = String(approxBytes);
+          $('statMB').textContent = (approxBytes / (1024 * 1024)).toFixed(2);
+          $('statPerTex').textContent = perTexBytes ? (perTexBytes / (1024 * 1024)).toFixed(2) : '-';
+        }
+
+        function createData(width, height) {
+          // Lightweight pattern to reduce compression/tiling savings
+          const n = width * height * 4;
+          const arr = new Uint8Array(n);
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const i = (y * width + x) * 4;
+              const v = (x ^ y) & 0xff;
+              arr[i + 0] = v;
+              arr[i + 1] = (v * 31) & 0xff;
+              arr[i + 2] = (v * 17) & 0xff;
+              arr[i + 3] = 255;
+            }
+          }
+          return arr;
+        }
+
+        function allocateOne(width, height, withMipmaps, useStorage, doUpload) {
+          const tex = gl.createTexture();
+          if (!tex) throw new Error('gl.createTexture returned null');
+          gl.bindTexture(gl.TEXTURE_2D, tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, withMipmaps ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+          const { bytes, levels } = bytesForLevels(width, height, withMipmaps);
+
+          try {
+            if (isWebGL2 && useStorage) {
+              const levelsCount = withMipmaps ? Math.floor(Math.log2(Math.max(width, height))) + 1 : 1;
+              gl.texStorage2D(gl.TEXTURE_2D, levelsCount, gl.RGBA8, width, height);
+              if (doUpload) {
+                const data = createData(width, height);
+                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+              }
+              if (withMipmaps) gl.generateMipmap(gl.TEXTURE_2D);
+            } else {
+              if (doUpload) {
+                const data = createData(width, height);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+              } else {
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+              }
+              if (withMipmaps) gl.generateMipmap(gl.TEXTURE_2D);
+            }
+          } catch (e) {
+            gl.deleteTexture(tex);
+            throw e;
+          }
+
+          const rec = { tex, width, height, levels, bytes };
+          textures.push(rec);
+          approxBytes += bytes;
+          return rec;
+        }
+
+        function freeLast(n) {
+          for (let i = 0; i < n; i++) {
+            const rec = textures.pop();
+            if (!rec) break;
+            gl.deleteTexture(rec.tex);
+            approxBytes -= rec.bytes;
+          }
+          updateStats();
+        }
+
+        function freeAll() {
+          for (const rec of textures) gl.deleteTexture(rec.tex);
+          textures.length = 0;
+          approxBytes = 0;
+          updateStats();
+        }
+
+        function allocMany(count) {
+          const width = Math.min(parseInt(sizeSelect.value, 10), maxSize);
+          const height = width;
+          const withMipmaps = !!useMipmaps.checked;
+          const useStorage = !!useTexStorage.checked;
+          const doUpload = !!uploadData.checked;
+          const { bytes } = bytesForLevels(width, height, withMipmaps);
+          updateStats(bytes);
+
+          let success = 0;
+          for (let i = 0; i < count; i++) {
+            try {
+              allocateOne(width, height, withMipmaps, useStorage, doUpload);
+              success++;
+            } catch (e) {
+              log('Allocation failed: ' + (e && e.message ? e.message : String(e)), 'bad');
+              break;
+            }
+            if (gl.isContextLost && gl.isContextLost()) {
+              log('Context lost during allocation', 'bad');
+              break;
+            }
+          }
+          updateStats(bytes);
+          log('Allocated ' + success + ' textures of ' + width + 'x' + height + (withMipmaps ? ' (mips)' : '') + '.', success > 0 ? 'good' : 'bad');
+        }
+
+        async function allocUntilFailure(batch = 16) {
+          const width = Math.min(parseInt(sizeSelect.value, 10), maxSize);
+          const height = width;
+          const withMipmaps = !!useMipmaps.checked;
+          const useStorage = !!useTexStorage.checked;
+          const doUpload = !!uploadData.checked;
+
+          let iter = 0;
+          while (true) {
+            if (gl.isContextLost && gl.isContextLost()) {
+              log('Context lost; stopping allocation loop', 'bad');
+              break;
+            }
+            let ok = true;
+            for (let i = 0; i < batch; i++) {
+              try {
+                allocateOne(width, height, withMipmaps, useStorage, doUpload);
+              } catch (e) {
+                log('Allocation failed: ' + (e && e.message ? e.message : String(e)), 'bad');
+                ok = false;
+                break;
+              }
+            }
+            updateStats();
+            if (!ok) break;
+            await new Promise(r => setTimeout(r, 0));
+            iter++;
+            if (iter % 8 === 0) log('Progress: ' + textures.length + ' textures');
+          }
+          log('Stopped at ' + textures.length + ' textures, ~' + ($('statMB').textContent) + ' MiB');
+        }
+
+        function allocToTargetMB() {
+          const target = Math.max(1, parseInt(targetMB.value, 10)) * 1024 * 1024;
+          const width = Math.min(parseInt(sizeSelect.value, 10), maxSize);
+          const withMipmaps = !!useMipmaps.checked;
+          const { bytes } = bytesForLevels(width, width, withMipmaps);
+          if (bytes <= 0) return;
+          const remaining = Math.max(0, target - approxBytes);
+          const need = Math.ceil(remaining / bytes);
+          if (need <= 0) {
+            log('Already at or above target. Current ~' + ($('statMB').textContent) + ' MiB', 'good');
+            return;
+          }
+          log('Allocating ' + need + ' textures to reach ~' + (target / (1024*1024)).toFixed(0) + ' MiB');
+          allocMany(need);
+        }
+
+        // Wire up events
+        $('btnAlloc').addEventListener('click', () => {
+          const n = Math.max(1, parseInt(allocCount.value, 10) || 1);
+          allocMany(n);
+        });
+        $('btnAlloc100').addEventListener('click', () => allocMany(100));
+        $('btnUntilFail').addEventListener('click', () => { allocUntilFailure(16); });
+        $('btnFreeLast').addEventListener('click', () => { freeLast(10); log('Freed last 10'); });
+        $('btnFreeHalf').addEventListener('click', () => { const n = Math.floor(textures.length / 2); freeLast(n); log('Freed ' + n); });
+        $('btnFreeAll').addEventListener('click', () => { freeAll(); log('Freed all'); });
+
+        $('btnAllocTarget').addEventListener('click', allocToTargetMB);
+
+        // React to size/mipmap changes to show per-texture cost
+        function refreshPerTexture() {
+          const w = Math.min(parseInt(sizeSelect.value, 10), maxSize);
+          const withMipmaps = !!useMipmaps.checked;
+          const { bytes } = bytesForLevels(w, w, withMipmaps);
+          updateStats(bytes);
+        }
+        sizeSelect.addEventListener('change', refreshPerTexture);
+        useMipmaps.addEventListener('change', refreshPerTexture);
+        refreshPerTexture();
+
+        // Context lost/restored handling
+        canvas.addEventListener('webglcontextlost', (e) => {
+          e.preventDefault();
+          $('statCtx').textContent = 'lost';
+          $('ctxWarning').style.display = '';
+          log('WebGL context lost', 'bad');
+        }, false);
+        canvas.addEventListener('webglcontextrestored', () => {
+          $('statCtx').textContent = 'restored';
+          $('ctxWarning').style.display = 'none';
+          log('WebGL context restored. Previously created textures are invalid.', 'warn');
+          textures.length = 0;
+          approxBytes = 0;
+          updateStats();
+        }, false);
+
+        // Tiny clear so the GPU gets touched
+        gl.clearColor(0.05, 0.07, 0.12, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        log('Ready. Renderer: ' + (renderer || '?') + ', API: ' + api, 'good');
+      })();
+    </script>
+  </body>
+</html>
