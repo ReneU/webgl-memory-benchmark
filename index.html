@@ -64,6 +64,33 @@
         width: 100%;
         box-sizing: border-box;
       }
+      input[type="range"] {
+        width: 100%;
+        height: 6px;
+        background: #0f1420;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        outline: none;
+        appearance: none;
+        -webkit-appearance: none;
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+      }
+      input[type="range"]::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--accent);
+        cursor: pointer;
+        border: none;
+      }
       input[type="checkbox"] { transform: translateY(1px); }
       button {
         background: #192234;
@@ -98,7 +125,7 @@
   <body>
     <div class="container">
       <h1>WebGL Texture Memory Benchmark</h1>
-      <div class="subtle">Allocate textures to probe GPU memory limits. Use carefully; may reset your graphics driver.</div>
+      <div class="subtle">Allocate textures to probe GPU memory limits. Use carefully; may crash your browser or OS.</div>
 
       <div class="grid" style="margin-top:16px;">
         <div class="panel controls">
@@ -146,6 +173,13 @@
             <button id="btnAllocTarget">Allocate to target</button>
           </div>
 
+          <label>Allocation rate (MB/s): <span id="rateValue" class="mono" style="color:var(--accent)">50</span></label>
+          <input id="rateSlider" type="range" min="1" max="500" value="50" />
+          
+          <div class="row" style="margin-top:4px;">
+            <button id="btnStopAlloc" class="warn" disabled>Stop allocation</button>
+          </div>
+
           <div class="row" style="margin-top:8px;">
             <button class="warn" id="btnFreeLast">Free last 10</button>
             <button class="warn" id="btnFreeHalf">Free half</button>
@@ -169,14 +203,16 @@
         </div>
 
         <div class="panel">
+          <div class="subtle">Log</div>
+          <div id="log" class="log mono"></div>
+        </div>
+      </div>
+
+      <div class="grid" style="margin-top:16px;">
+        <div class="panel">
           <div class="subtle">Canvas</div>
           <canvas id="glcanvas" width="640" height="360"></canvas>
           <div id="ctxWarning" class="subtle bad" style="display:none; margin-top:8px;">Context lost. Free some textures or wait for restore.</div>
-        </div>
-
-        <div class="panel">
-          <div class="subtle">Log</div>
-          <div id="log" class="log mono"></div>
         </div>
       </div>
     </div>
@@ -233,6 +269,9 @@
         const uploadData = $('uploadData');
         const allocCount = $('allocCount');
         const targetMB = $('targetMB');
+        const rateSlider = $('rateSlider');
+        const rateValue = $('rateValue');
+        const btnStopAlloc = $('btnStopAlloc');
 
         // Disable texStorage checkbox if not WebGL2
         if (!isWebGL2) {
@@ -249,6 +288,8 @@
         /** @type {TextureRecord[]} */
         const textures = [];
         let approxBytes = 0;
+        let isAllocatingToTarget = false;
+        let shouldStopAllocation = false;
 
         function bytesForLevels(width, height, withMipmaps) {
           let total = 0;
@@ -405,20 +446,92 @@
           log('Stopped at ' + textures.length + ' textures, ~' + ($('statMB').textContent) + ' MiB');
         }
 
-        function allocToTargetMB() {
+        async function allocToTargetMB() {
+          if (isAllocatingToTarget) {
+            log('Allocation already in progress', 'warn');
+            return;
+          }
+
           const target = Math.max(1, parseInt(targetMB.value, 10)) * 1024 * 1024;
+          const ratePerSecond = parseFloat(rateSlider.value) * 1024 * 1024; // MB/s to bytes/s
           const width = Math.min(parseInt(sizeSelect.value, 10), maxSize);
           const withMipmaps = !!useMipmaps.checked;
+          const useStorage = !!useTexStorage.checked;
+          const doUpload = !!uploadData.checked;
           const { bytes } = bytesForLevels(width, width, withMipmaps);
+          
           if (bytes <= 0) return;
+          
           const remaining = Math.max(0, target - approxBytes);
-          const need = Math.ceil(remaining / bytes);
-          if (need <= 0) {
+          const totalNeeded = Math.ceil(remaining / bytes);
+          
+          if (totalNeeded <= 0) {
             log('Already at or above target. Current ~' + ($('statMB').textContent) + ' MiB', 'good');
             return;
           }
-          log('Allocating ' + need + ' textures to reach ~' + (target / (1024*1024)).toFixed(0) + ' MiB');
-          allocMany(need);
+
+          isAllocatingToTarget = true;
+          shouldStopAllocation = false;
+          btnStopAlloc.disabled = false;
+          $('btnAllocTarget').disabled = true;
+
+          log('Starting gradual allocation to reach ~' + (target / (1024*1024)).toFixed(0) + ' MiB at ' + rateSlider.value + ' MB/s');
+
+          const intervalMs = 100; // Update every 100ms
+          const bytesPerInterval = (ratePerSecond * intervalMs) / 1000;
+          const texturesPerInterval = Math.max(1, Math.floor(bytesPerInterval / bytes));
+
+          let allocated = 0;
+          const startTime = Date.now();
+
+          while (allocated < totalNeeded && !shouldStopAllocation) {
+            if (gl.isContextLost && gl.isContextLost()) {
+              log('Context lost during allocation', 'bad');
+              break;
+            }
+
+            const batchSize = Math.min(texturesPerInterval, totalNeeded - allocated);
+            let success = true;
+
+            for (let i = 0; i < batchSize; i++) {
+              try {
+                allocateOne(width, width, withMipmaps, useStorage, doUpload);
+                allocated++;
+              } catch (e) {
+                log('Allocation failed: ' + (e && e.message ? e.message : String(e)), 'bad');
+                success = false;
+                break;
+              }
+            }
+
+            updateStats(bytes);
+
+            if (!success) break;
+
+            // Wait for next interval
+            await new Promise(r => setTimeout(r, intervalMs));
+          }
+
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          const actualRate = allocated > 0 ? ((allocated * bytes / (1024 * 1024)) / parseFloat(elapsed)).toFixed(1) : 0;
+
+          if (shouldStopAllocation) {
+            log('Allocation stopped by user. Allocated ' + allocated + ' textures in ' + elapsed + 's (avg ' + actualRate + ' MB/s)', 'warn');
+          } else {
+            log('Completed: allocated ' + allocated + ' textures in ' + elapsed + 's (avg ' + actualRate + ' MB/s)', 'good');
+          }
+
+          isAllocatingToTarget = false;
+          shouldStopAllocation = false;
+          btnStopAlloc.disabled = true;
+          $('btnAllocTarget').disabled = false;
+        }
+
+        function stopAllocation() {
+          if (isAllocatingToTarget) {
+            shouldStopAllocation = true;
+            log('Stopping allocation...', 'warn');
+          }
         }
 
         // Wire up events
@@ -433,6 +546,12 @@
         $('btnFreeAll').addEventListener('click', () => { freeAll(); log('Freed all'); });
 
         $('btnAllocTarget').addEventListener('click', allocToTargetMB);
+        $('btnStopAlloc').addEventListener('click', stopAllocation);
+
+        // Update rate display when slider changes
+        rateSlider.addEventListener('input', () => {
+          rateValue.textContent = rateSlider.value;
+        });
 
         // React to size/mipmap changes to show per-texture cost
         function refreshPerTexture() {
